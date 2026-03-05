@@ -1,0 +1,78 @@
+# ── Environment ──────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python ───────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ──────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Models (large binary files — use symlinks) ─
+models/
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+*.pkl
+*.joblib
+
+# ── DocLing cache / output ────────────────────
+.docling/
+docling_cache/
+*.pdf_extracted/
+
+# ── Database ──────────────────────────────────
+*.sqlite3
+*.sqlite
+*.db
+
+# ── Uploads / processed files ─────────────────
+backend/uploads/
+backend/tmp/
+*.jpg
+*.jpeg
+*.png
+*.tiff
+*.tif
+!frontend/assets/*.png
+
+# ── Logs & audit ──────────────────────────────
+logs/
+*.log
+audit_trail/
+
+# ── Jupyter ───────────────────────────────────
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# ── OS ────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── VS Code ───────────────────────────────────
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# ── Docker ────────────────────────────────────
+*.tar
+
+# ── Test / coverage ───────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS suppliers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    address TEXT,
+    tax_id VARCHAR(50),
+    iban VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

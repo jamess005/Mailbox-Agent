@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIMailbox — Invoice & Query Processing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ═══ SIDEBAR — INBOX ═══ -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="mailbox-identity">
+        <div class="mailbox-avatar">AI</div>
+        <div class="mailbox-info">
+          <span class="mailbox-name">AIMailbox</span>
+          <span class="mailbox-address">AIMailbox@gmail.com</span>
+        </div>
+      </div>
+      <button class="compose-btn" id="composeBtn" title="New email">✎ COMPOSE</button>
+    </div>
+
+    <div class="inbox-label">INBOX</div>
+
+    <div class="inbox-list" id="inboxList">
+      <!-- populated by JS -->
+      <div class="inbox-empty" id="inboxEmpty">No messages yet</div>
+    </div>
+  </aside>
+
+  <!-- ═══ MAIN — EMAIL VIEW / COMPOSE ═══ -->
+  <main class="main-pane">
+
+    <!-- Default welcome state -->
+    <div class="welcome-state" id="welcomeState">
+      <div class="welcome-icon">✉</div>
+      <div class="welcome-title">AIMailbox</div>
+      <div class="welcome-sub">Compose an email to send an invoice or supplier query.<br>Replies will appear in your inbox.</div>
+    </div>
+
+    <!-- Compose panel -->
+    <div class="compose-panel hidden" id="composePanel">
+      <div class="compose-header">
+        <span class="compose-title">NEW MESSAGE</span>
+        <button class="compose-close" id="composeClose">✕</button>
+      </div>
+
+      <div class="compose-fields">
+        <div class="compose-field">
+          <span class="compose-label">TO</span>
+          <span class="compose-to-fixed">AIMailbox@gmail.com</span>
+        </div>
+        <div class="compose-field">
+          <span class="compose-label">FROM</span>
+          <input class="compose-input" id="cFrom" type="text" placeholder="your@email.com" />
+        </div>
+        <div class="compose-field">
+          <span class="compose-label">SUBJECT</span>
+          <input class="compose-input" id="cSubject" type="text" placeholder="Invoice submission or supplier query" />
+        </div>
+      </div>
+
+      <textarea class="compose-body" id="cBody"
+        placeholder="Write your message here — describe the invoice or ask about a supplier…"></textarea>
+
+      <div class="compose-footer">
+        <div class="attachment-area" id="attachArea">
+          <div class="attach-drop" id="attachDrop">
+            <input type="file" id="attachInput" accept=".png,.jpg,.jpeg,.pdf,.tiff,.tif" hidden />
+            <span class="attach-drop-icon">📎</span>
+            <span class="attach-drop-text">Attach invoice</span>
+          </div>
+          <div class="attach-chip hidden" id="attachChip">
+            <span class="attach-chip-icon">📎</span>
+            <span class="attach-chip-name" id="attachChipName"></span>
+            <button class="attach-chip-remove" id="attachRemove">✕</button>
+          </div>
+        </div>
+        <button class="send-btn" id="sendBtn">
+          <span id="sendBtnLabel">SEND</span>
+          <span class="send-spinner hidden" id="sendSpinner">⟳</span>
+          <span id="sendArrow">→</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Email thread view -->
+    <div class="thread-view hidden" id="threadView">
+      <div class="thread-header">
+        <button class="back-btn" id="backBtn">← INBOX</button>
+        <div class="thread-subject" id="threadSubject"></div>
+      </div>
+      <div class="thread-messages" id="threadMessages"></div>
+    </div>
+
+  </main>
+
+  <!-- ═══ AUDIT LOG ═══ -->
+  <footer class="audit-footer">
+    <div class="audit-bar">
+      <span class="audit-title">SYSTEM LOG</span>
+      <span class="audit-count" id="auditCount">0 events</span>
+      <button class="audit-clear-btn" id="auditClear">CLEAR</button>
+    </div>
+    <div class="audit-scroll" id="auditLog">
+      <span class="audit-entry type-init">▸ AIMailbox ready. Compose an email to begin.</span>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
