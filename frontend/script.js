@@ -27,6 +27,7 @@ const state = {
   attachment: null,      // { name, size, type, base64 }
   threads: [],           // array of thread objects
   activeThreadId: null,
+  abortControllers: {},  // threadId → AbortController
 };
 
 /* ═══════════════════════════
@@ -57,9 +58,17 @@ const sendBtnLabel  = $('sendBtnLabel');
 const sendSpinner   = $('sendSpinner');
 const sendArrow     = $('sendArrow');
 
-const backBtn       = $('backBtn');
-const threadSubject = $('threadSubject');
-const threadMessages= $('threadMessages');
+const backBtn          = $('backBtn');
+const threadSubject    = $('threadSubject');
+const threadMessages   = $('threadMessages');
+const threadDeleteBtn  = $('threadDeleteBtn');
+
+const replyComposer      = $('replyComposer');
+const replyComposerRef   = $('replyComposerRef');
+const replyComposerBody  = $('replyComposerBody');
+const replyComposerHint  = $('replyComposerHint');
+const replyComposerSend  = $('replyComposerSend');
+const replyComposerClose = $('replyComposerClose');
 
 const auditLog      = $('auditLog');
 const auditCount    = $('auditCount');
@@ -75,7 +84,6 @@ function openCompose() {
   welcomeState.classList.add('hidden');
   threadView.classList.add('hidden');
   composePanel.classList.remove('hidden');
-  // Deselect inbox
   document.querySelectorAll('.inbox-thread').forEach(el => el.classList.remove('active'));
   state.activeThreadId = null;
   cFrom.focus();
@@ -138,23 +146,20 @@ async function handleSend() {
   if (!subject)        { audit('Please enter a subject.', 'warn'); cSubject.focus(); return; }
   if (!hasFile && !hasText) { audit('Please attach an invoice or write a message body.', 'warn'); return; }
 
-  // Determine pipeline
   let pipeline, pipelineLabel;
   if (hasFile && hasText)  { pipeline = 'combined_verification'; pipelineLabel = 'COMBINED'; }
   else if (hasFile)        { pipeline = 'invoice_extraction';    pipelineLabel = 'INVOICE';  }
   else                     { pipeline = 'supplier_query';        pipelineLabel = 'QUERY';    }
 
-  // Auto-generate subject if blank-ish
   const finalSubject = subject || (hasFile ? `Invoice — ${state.attachment.name}` : 'Supplier Query');
 
-  // Create thread
   const threadId = `thread_${Date.now()}`;
   const now = new Date();
 
   const outboundMsg = {
     id:        `msg_${Date.now()}`,
     direction: 'outbound',
-    from:      from,
+    from,
     to:        MAILBOX,
     time:      now,
     body:      body || null,
@@ -166,12 +171,13 @@ async function handleSend() {
   const thread = {
     id:       threadId,
     subject:  finalSubject,
-    from:     from,
+    from,
     pipeline,
     pipelineLabel,
     messages: [outboundMsg],
     status:   'pending',
     time:     now,
+    pendingInvoiceNumber: null,
   };
 
   state.threads.unshift(thread);
@@ -182,45 +188,94 @@ async function handleSend() {
 
   audit(`Sent → ${pipeline} | from: ${from} | subject: ${finalSubject}`, 'info');
 
-  // Build payload for backend
-  const payload = {
-    pipeline,
-    timestamp:  now.toISOString(),
-    email: {
-      from,
-      subject:  finalSubject,
-      body:     body || null,
-    },
-    invoice: hasFile ? {
-      filename:          state.attachment.name,
-      mime_type:         state.attachment.type,
-      size_bytes:        state.attachment.size,
-      base64_data:       state.attachment.base64,
-      extraction_engine: 'docling',
-    } : null,
-  };
-
-  // Show processing indicator
   showProcessing(threadId);
 
-  // Reset compose
   cFrom.value = ''; cSubject.value = ''; cBody.value = '';
-  clearAttachment();
 
-  // Call backend
-  await callBackend(threadId, payload);
+  // Combined: fire invoice extraction first, then query independently
+  if (hasFile && hasText) {
+    const invPayload = {
+      pipeline:  'invoice_extraction',
+      timestamp: now.toISOString(),
+      email:     { from, subject: finalSubject, body: null },
+      invoice:   {
+        filename:          state.attachment.name,
+        mime_type:         state.attachment.type,
+        size_bytes:        state.attachment.size,
+        base64_data:       state.attachment.base64,
+        extraction_engine: 'docling',
+      },
+    };
+    clearAttachment();
+
+    await callBackend(threadId, invPayload);
+
+    // Thread may have been deleted while invoice was processing
+    const stillExists = state.threads.find(t => t.id === threadId);
+    if (stillExists) {
+      showProcessing(threadId, false);
+      const queryPayload = {
+        pipeline:  'supplier_query',
+        timestamp: new Date().toISOString(),
+        email:     { from, subject: finalSubject, body },
+      };
+      await callBackend(threadId, queryPayload);
+    }
+  } else {
+    const payload = {
+      pipeline,
+      timestamp: now.toISOString(),
+      email:     { from, subject: finalSubject, body: body || null },
+      invoice: hasFile ? {
+        filename:          state.attachment.name,
+        mime_type:         state.attachment.type,
+        size_bytes:        state.attachment.size,
+        base64_data:       state.attachment.base64,
+        extraction_engine: 'docling',
+      } : null,
+    };
+    clearAttachment();
+    await callBackend(threadId, payload);
+  }
 }
 
 /* ═══════════════════════════
    BACKEND CALL
 ═══════════════════════════ */
-async function callBackend(threadId, payload) {
+async function callBackend(threadId, payload, attempt = 1, _controller = null) {
+  const MAX_ATTEMPTS = 12;
+  const RETRY_MS     = 5000;
+
+  // Each call gets its own AbortController so concurrent requests
+  // (e.g. query in-flight while approval is sent) don't cancel each other.
+  const controller = _controller || new AbortController();
+  if (!state.abortControllers[threadId]) state.abortControllers[threadId] = new Set();
+  if (!_controller) state.abortControllers[threadId].add(controller);
+  const signal = controller.signal;
+
   try {
     const res = await fetch(`${API_BASE}/api/process`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal,
     });
+
+    if (res.status === 503) {
+      if (attempt >= MAX_ATTEMPTS) {
+        removeProcessing(threadId);
+        addReplyMessage(threadId, {
+          status: 'error',
+          body:   'Backend failed to become ready within 60 s. Please restart the server.',
+        });
+        audit('Backend did not become ready in time.', 'error');
+        return;
+      }
+      const retryAfter = parseInt(res.headers.get('Retry-After') || '5', 10) * 1000;
+      audit(`Server still loading… retrying in ${retryAfter / 1000} s (attempt ${attempt}/${MAX_ATTEMPTS})`, 'warn');
+      setTimeout(() => callBackend(threadId, payload, attempt + 1, controller), retryAfter);
+      return;
+    }
 
     removeProcessing(threadId);
 
@@ -234,14 +289,26 @@ async function callBackend(threadId, payload) {
     audit(`Reply received — pipeline: ${payload.pipeline}`, 'ok');
 
   } catch (err) {
+    if (err.name === 'AbortError') {
+      removeProcessing(threadId);
+      audit('Backend call aborted (thread deleted).', 'warn');
+      return;
+    }
     removeProcessing(threadId);
-    // Show error as a reply in the thread
     addReplyMessage(threadId, {
       status:  'error',
       subject: 'Processing Error',
       body:    `Failed to process your message.\n\n${err.message}\n\nMake sure the backend server is running:\n  cd backend && uvicorn main:app --reload`,
     });
     audit(`Backend error: ${err.message}`, 'error');
+  } finally {
+    const set = state.abortControllers[threadId];
+    if (set instanceof Set) {
+      set.delete(controller);
+      if (set.size === 0) delete state.abortControllers[threadId];
+    } else {
+      delete state.abortControllers[threadId];
+    }
   }
 }
 
@@ -254,7 +321,6 @@ function showThread(threadId) {
 
   state.activeThreadId = threadId;
 
-  // Mark as read in sidebar
   document.querySelectorAll('.inbox-thread').forEach(el => el.classList.remove('active'));
   const row = document.querySelector(`.inbox-thread[data-id="${threadId}"]`);
   if (row) {
@@ -271,19 +337,21 @@ function showThread(threadId) {
   threadSubject.textContent = thread.subject;
   threadMessages.innerHTML  = '';
 
-  thread.messages.forEach(msg => renderMessage(msg));
+  thread.messages.forEach(msg => renderMessage(msg, thread));
 
-  // Re-add processing card if still pending
   if (thread.status === 'pending') {
-    showProcessing(threadId, false); // false = don't re-add to state
+    showProcessing(threadId, false);
   }
+
+  closeReplyComposer();
 
   threadMessages.scrollTop = threadMessages.scrollHeight;
 }
 
-function renderMessage(msg) {
+function renderMessage(msg, thread) {
+  const card = document.createElement('div');
+
   if (msg.direction === 'outbound') {
-    const card = document.createElement('div');
     card.className = 'message-card outbound';
     card.innerHTML = `
       <div class="message-head">
@@ -293,17 +361,28 @@ function renderMessage(msg) {
         </div>
         <div class="message-meta">
           <span class="message-time">${fmtTime(msg.time)}</span>
-          <span class="message-type-badge ${msg.pipeline === 'invoice_extraction' ? 'invoice' : msg.pipeline === 'supplier_query' ? 'query' : 'combined'}">${msg.pipelineLabel}</span>
+          <span class="message-type-badge ${
+            msg.pipeline === 'invoice_extraction' ? 'invoice'
+          : msg.pipeline === 'supplier_query'     ? 'query'
+          : msg.pipeline === 'invoice_approval' && msg.pipelineLabel === 'ACCEPT'  ? 'combined'
+          : msg.pipeline === 'invoice_approval' && msg.pipelineLabel === 'DECLINE' ? 'decline'
+          : 'combined'}">${msg.pipelineLabel}</span>
         </div>
       </div>
       ${msg.body ? `<div class="message-body">${esc(msg.body)}</div>` : ''}
       ${msg.attachment ? `<div class="message-attachment">📎 ${esc(msg.attachment.name)} <span style="color:var(--text-muted)">(${fmtBytes(msg.attachment.size)})</span></div>` : ''}
+      <div class="message-actions">
+        <button class="msg-action-btn reply-action" data-action="reply">↩ Reply</button>
+        <button class="msg-action-btn forward-action" data-action="forward">↗ Forward</button>
+        <button class="msg-action-btn delete-action" data-action="delete">✕ Delete</button>
+      </div>
     `;
-    threadMessages.appendChild(card);
   } else {
-    const card = document.createElement('div');
-    card.className = `message-card inbound`;
-    const statusColour = msg.status === 'error' ? 'var(--red)' : 'var(--green)';
+    const isPending = msg.status === 'pending_approval';
+    const isError   = msg.status === 'error';
+    const badgeLabel = isError ? 'ERROR' : isPending ? 'REVIEW' : 'REPLY';
+    const badgeClass = isPending ? 'pending' : 'reply';
+    card.className = 'message-card inbound';
     card.innerHTML = `
       <div class="message-head">
         <div class="message-from-wrap">
@@ -312,30 +391,188 @@ function renderMessage(msg) {
         </div>
         <div class="message-meta">
           <span class="message-time">${fmtTime(msg.time || new Date())}</span>
-          <span class="message-type-badge reply">${msg.status === 'error' ? 'ERROR' : 'REPLY'}</span>
+          <span class="message-type-badge ${badgeClass}">${badgeLabel}</span>
         </div>
       </div>
       <div class="message-body reply-body">${esc(msg.body || '')}</div>
+      <div class="message-actions">
+        <button class="msg-action-btn reply-action" data-action="reply">↩ Reply</button>
+        <button class="msg-action-btn forward-action" data-action="forward">↗ Forward</button>
+        <button class="msg-action-btn delete-action" data-action="delete">✕ Delete</button>
+      </div>
     `;
-    threadMessages.appendChild(card);
   }
+
+  // Wire action buttons
+  card.querySelector('[data-action="reply"]').addEventListener('click', () => {
+    openReplyComposer(thread);
+  });
+  card.querySelector('[data-action="forward"]').addEventListener('click', () => {
+    audit('Forward is not available in this simulation.', 'warn');
+  });
+  card.querySelector('[data-action="delete"]').addEventListener('click', () => {
+    const idx = thread.messages.findIndex(m => m.id === msg.id);
+    if (idx !== -1) {
+      thread.messages.splice(idx, 1);
+      card.remove();
+      audit('Message deleted from thread.', 'edit');
+      if (thread.messages.length === 0) deleteThread(thread.id);
+    }
+  });
+
+  threadMessages.appendChild(card);
 }
 
-function showProcessing(threadId, addToThread = true) {
-  // Remove any existing
-  removeProcessing(threadId);
+/* ═══════════════════════════
+   REPLY COMPOSER (in-thread)
+═══════════════════════════ */
+function openReplyComposer(thread) {
+  if (!thread) return;
+  replyComposer.classList.remove('hidden');
+  replyComposerRef.textContent = `Re: ${thread.subject}`;
+  replyComposerBody.value = '';
 
+  if (thread.pendingInvoiceNumber) {
+    replyComposerHint.textContent = `Invoice ${thread.pendingInvoiceNumber} awaiting review — reply "accept" or "decline"`;
+    replyComposerHint.classList.add('visible');
+  } else {
+    replyComposerHint.textContent = '';
+    replyComposerHint.classList.remove('visible');
+  }
+
+  replyComposerBody.focus();
+  setTimeout(() => {
+    replyComposer.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, 50);
+}
+
+function closeReplyComposer() {
+  replyComposer.classList.add('hidden');
+  replyComposerBody.value = '';
+  replyComposerHint.textContent = '';
+  replyComposerHint.classList.remove('visible');
+}
+
+replyComposerClose.addEventListener('click', closeReplyComposer);
+replyComposerSend.addEventListener('click', handleReplySend);
+replyComposerBody.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleReplySend();
+});
+
+function handleReplySend() {
+  const thread = state.threads.find(t => t.id === state.activeThreadId);
+  if (!thread) return;
+
+  const body = replyComposerBody.value.trim();
+  if (!body) { audit('Reply body is empty.', 'warn'); replyComposerBody.focus(); return; }
+
+  closeReplyComposer();
+
+  const normalised = body.toLowerCase().replace(/[^a-z]/g, '');
+  const isAccept  = thread.pendingInvoiceNumber && normalised === 'accept';
+  const isDecline = thread.pendingInvoiceNumber && normalised === 'decline';
+
+  if (isAccept || isDecline) {
+    const decision = isAccept ? 'accept' : 'decline';
+    const invoiceNumber = thread.pendingInvoiceNumber;
+    thread.pendingInvoiceNumber = null;
+
+    const outMsg = {
+      id:            `msg_${Date.now()}`,
+      direction:     'outbound',
+      from:          thread.from,
+      to:            MAILBOX,
+      time:          new Date(),
+      body,
+      attachment:    null,
+      pipeline:      'invoice_approval',
+      pipelineLabel: decision.toUpperCase(),
+    };
+    thread.messages.push(outMsg);
+    renderMessage(outMsg, thread);
+    showProcessing(thread.id);
+
+    audit(`Reply: ${decision.toUpperCase()} for invoice ${invoiceNumber}`,
+          decision === 'accept' ? 'ok' : 'warn');
+
+    callBackend(thread.id, {
+      pipeline:       'invoice_approval',
+      timestamp:      new Date().toISOString(),
+      invoice_number: invoiceNumber,
+      decision,
+      email: { from: thread.from, subject: `Re: ${thread.subject}`, body },
+    });
+  } else {
+    // Generic reply — route as a new query to backend
+    const outMsg = {
+      id:            `msg_${Date.now()}`,
+      direction:     'outbound',
+      from:          thread.from,
+      to:            MAILBOX,
+      time:          new Date(),
+      body,
+      attachment:    null,
+      pipeline:      'supplier_query',
+      pipelineLabel: 'QUERY',
+    };
+    thread.messages.push(outMsg);
+    renderMessage(outMsg, thread);
+
+    if (thread.pendingInvoiceNumber) {
+      // Still pending approval — remind, don't route to backend
+      const hintMsg = {
+        id:        `msg_${Date.now() + 1}`,
+        direction: 'inbound',
+        from:      MAILBOX,
+        to:        thread.from,
+        time:      new Date(),
+        status:    'pending_approval',
+        body:      `Your reply was noted, but invoice ${thread.pendingInvoiceNumber} is still awaiting your decision.\n\nPlease reply with "accept" or "decline" to proceed.`,
+      };
+      thread.messages.push(hintMsg);
+      renderMessage(hintMsg, thread);
+      audit('Reply noted — awaiting accept/decline decision.', 'info');
+    } else {
+      // Send to backend as supplier_query
+      showProcessing(thread.id);
+      audit(`Reply → supplier_query from: ${thread.from}`, 'info');
+
+      callBackend(thread.id, {
+        pipeline:  'supplier_query',
+        timestamp: new Date().toISOString(),
+        email: { from: thread.from, subject: `Re: ${thread.subject}`, body },
+      });
+    }
+  }
+
+  // Update inbox row snippet
+  const row = document.querySelector(`.inbox-thread[data-id="${thread.id}"]`);
+  if (row) {
+    const snippet = row.querySelector('.thread-row-snippet');
+    if (snippet) snippet.textContent = body.substring(0, 60).replace(/\n/g, ' ');
+    const count = row.querySelector('.thread-row-count');
+    if (count) count.textContent = thread.messages.length;
+  }
+
+  threadMessages.scrollTop = threadMessages.scrollHeight;
+}
+
+/* ═══════════════════════════
+   PROCESSING INDICATOR
+═══════════════════════════ */
+function showProcessing(threadId, addToThread = true) {
+  removeProcessing(threadId);
   const thread = state.threads.find(t => t.id === threadId);
   if (addToThread && thread) thread.status = 'pending';
 
   const el = document.createElement('div');
-  el.className     = 'processing-card';
-  el.id            = `proc_${threadId}`;
+  el.className = 'processing-card';
+  el.id        = `proc_${threadId}`;
   el.innerHTML = `
     <span class="processing-spin">⟳</span>
     <div>
       <div class="processing-text">Processing your message…</div>
-      <div class="processing-sub">DocLing extraction + pipeline validation running</div>
+      <div class="processing-sub">Pipeline running — this may take a moment</div>
     </div>
   `;
   threadMessages.appendChild(el);
@@ -347,11 +584,41 @@ function removeProcessing(threadId) {
   if (el) el.remove();
 }
 
+function cancelProcessing(threadId) {
+  const set = state.abortControllers[threadId];
+  if (set instanceof Set) {
+    for (const c of set) c.abort();
+  } else if (set) {
+    set.abort();
+  }
+  delete state.abortControllers[threadId];
+  removeProcessing(threadId);
+  const thread = state.threads.find(t => t.id === threadId);
+  if (thread) thread.status = 'idle';
+  audit('Request cancelled.', 'warn');
+}
+
+/* ═══════════════════════════
+   REPLY MESSAGE (from backend)
+═══════════════════════════ */
 function addReplyMessage(threadId, data) {
   const thread = state.threads.find(t => t.id === threadId);
   if (!thread) return;
 
-  thread.status = data.status === 'error' ? 'error' : 'replied';
+  const isPendingApproval = data.status === 'pending_approval';
+
+  // Only update thread status if this is an error, an approval prompt, or
+  // the thread is NOT already waiting for an accept/decline decision.
+  if (data.status === 'error') {
+    thread.status = 'error';
+  } else if (isPendingApproval) {
+    thread.status = 'pending_approval';
+    thread.pendingInvoiceNumber = data.invoice_number || null;
+  } else if (thread.status !== 'pending_approval') {
+    thread.status = 'replied';
+  }
+  // Note: pendingInvoiceNumber is only cleared by handleReplySend when
+  // the user explicitly accepts or declines.
 
   const replyMsg = {
     id:        `msg_${Date.now()}`,
@@ -370,23 +637,34 @@ function addReplyMessage(threadId, data) {
   if (row) {
     const badge = row.querySelector('.thread-row-badge');
     if (badge) {
-      badge.textContent = 'REPLY';
-      badge.className   = 'thread-row-badge reply';
+      if (isPendingApproval) {
+        badge.textContent = 'REVIEW';
+        badge.className   = 'thread-row-badge pending';
+      } else if (thread.status !== 'pending_approval') {
+        badge.textContent = 'REPLY';
+        badge.className   = 'thread-row-badge reply';
+      }
     }
+    const snippet = row.querySelector('.thread-row-snippet');
+    if (snippet) {
+      const preview = (replyMsg.body || '').substring(0, 60).replace(/\n/g, ' ');
+      snippet.textContent = preview || thread.subject;
+    }
+    const count = row.querySelector('.thread-row-count');
+    if (count) count.textContent = thread.messages.length;
   }
 
-  // If thread is visible, render
+  // Render if active thread
   if (state.activeThreadId === threadId) {
-    renderMessage(replyMsg);
+    renderMessage(replyMsg, thread);
     threadMessages.scrollTop = threadMessages.scrollHeight;
   }
 }
 
 function formatReplyBody(data) {
-  // Fallback formatter if backend doesn't return email_body
   if (data.status === 'error') return data.message || 'An error occurred.';
   const lines = [];
-  if (data.invoice_number) lines.push(`Invoice #${data.invoice_number}`);
+  if (data.invoice_number) lines.push(`Invoice ${data.invoice_number}`);
   if (data.supplier)       lines.push(`Supplier: ${data.supplier}`);
   if (data.message)        lines.push(data.message);
   if (data.checks)         lines.push('\nChecks:\n' + Object.entries(data.checks).map(([k,v]) => `  ${k}: ${v}`).join('\n'));
@@ -407,28 +685,76 @@ function addInboxRow(thread) {
                    : thread.pipeline === 'supplier_query'     ? 'query' : 'combined';
   const badgeLabel = thread.pipelineLabel;
 
+  const snippet = (thread.messages[0] && thread.messages[0].body)
+    ? thread.messages[0].body.substring(0, 60).replace(/\n/g, ' ')
+    : thread.subject;
+
   row.innerHTML = `
     <div class="unread-dot"></div>
     <div class="thread-row-from">${esc(thread.from)}</div>
     <div class="thread-row-subject">${esc(thread.subject)}</div>
+    <div class="thread-row-snippet">${esc(snippet)}</div>
     <div class="thread-row-meta">
       <span class="thread-row-time">${fmtTime(thread.time)}</span>
+      <span class="thread-row-count">${thread.messages.length}</span>
       <span class="thread-row-badge ${badgeClass}">${badgeLabel}</span>
+      <span class="thread-row-delete" title="Delete thread">DELETE</span>
     </div>
   `;
 
+  row.querySelector('.thread-row-delete').addEventListener('click', e => {
+    e.stopPropagation();
+    deleteThread(thread.id);
+  });
+
   row.addEventListener('click', () => showThread(thread.id));
 
-  // Prepend — newest at top
   inboxList.insertBefore(row, inboxList.firstChild);
 }
 
+/* ═══════════════════════════
+   THREAD NAV
+═══════════════════════════ */
 backBtn.addEventListener('click', () => {
   threadView.classList.add('hidden');
+  closeReplyComposer();
   welcomeState.classList.remove('hidden');
   document.querySelectorAll('.inbox-thread').forEach(el => el.classList.remove('active'));
   state.activeThreadId = null;
 });
+
+threadDeleteBtn.addEventListener('click', () => {
+  if (state.activeThreadId) deleteThread(state.activeThreadId);
+});
+
+function deleteThread(threadId) {
+  // Abort any in-flight backend calls for this thread
+  const set = state.abortControllers[threadId];
+  if (set instanceof Set) {
+    for (const c of set) c.abort();
+  } else if (set) {
+    set.abort();
+  }
+  delete state.abortControllers[threadId];
+
+  const idx = state.threads.findIndex(t => t.id === threadId);
+  if (idx !== -1) state.threads.splice(idx, 1);
+
+  const row = document.querySelector(`.inbox-thread[data-id="${threadId}"]`);
+  if (row) row.remove();
+
+  if (state.threads.length === 0) inboxEmpty.classList.remove('hidden');
+
+  if (state.activeThreadId === threadId) {
+    state.activeThreadId = null;
+    threadView.classList.add('hidden');
+    closeReplyComposer();
+    welcomeState.classList.remove('hidden');
+    document.querySelectorAll('.inbox-thread').forEach(el => el.classList.remove('active'));
+  }
+
+  audit('Thread deleted.', 'edit');
+}
 
 /* ═══════════════════════════
    AUDIT LOG

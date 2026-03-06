@@ -6,7 +6,7 @@
   <title>AIMailbox — Invoice & Query Processing</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=20260306g" />
 </head>
 <body>
 
@@ -92,8 +92,24 @@
       <div class="thread-header">
         <button class="back-btn" id="backBtn">← INBOX</button>
         <div class="thread-subject" id="threadSubject"></div>
+        <button class="thread-delete-btn" id="threadDeleteBtn" title="Delete thread">✕</button>
       </div>
       <div class="thread-messages" id="threadMessages"></div>
+
+      <!-- Inline reply composer (appears when user clicks Reply) -->
+      <div class="reply-composer hidden" id="replyComposer">
+        <div class="reply-composer-header">
+          <span class="reply-composer-label">REPLY</span>
+          <span class="reply-composer-ref" id="replyComposerRef"></span>
+          <button class="reply-composer-close" id="replyComposerClose">✕</button>
+        </div>
+        <textarea class="reply-composer-body" id="replyComposerBody"
+          placeholder="Type your reply…"></textarea>
+        <div class="reply-composer-footer">
+          <span class="reply-composer-hint" id="replyComposerHint"></span>
+          <button class="reply-composer-send" id="replyComposerSend">SEND REPLY →</button>
+        </div>
+      </div>
     </div>
 
   </main>
@@ -110,6 +126,6 @@
     </div>
   </footer>
 
-  <script src="script.js"></script>
+  <script src="script.js?v=20260306k"></script>
 </body>
 </html>
