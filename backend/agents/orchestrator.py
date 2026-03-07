@@ -12,7 +12,7 @@ if _backend not in sys.path:
 
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=os.path.join(_backend, '..', '..', '.env'))
+load_dotenv(dotenv_path=os.path.join(_backend, '..', '.env'))
 load_dotenv()
 
 # Must be set before torch/ROCm initialises — gfx1100 (RDNA3) requires both.
@@ -70,6 +70,7 @@ class Orchestrator:
                 quantization_config=quant_cfg,
                 device_map={"":0},
                 low_cpu_mem_usage=True,
+                attn_implementation="sdpa",
             )
         else:
             print("[orchestrator] No GPU — running on CPU (slow)")

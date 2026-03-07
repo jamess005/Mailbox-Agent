@@ -209,3 +209,119 @@ def approval_declined(sender: str, invoice_num: str) -> str:
         f"Please resubmit with any necessary corrections.\n\n"
         f"Regards,\nAIMailbox"
     )
+
+
+# ── Batch email templates ──
+
+
+def batch_approval_request(sender: str, extractions: list[dict], results: list[dict]) -> str:
+    """Review email for a batch of invoices — all passed validation."""
+    SEP = "  " + "─" * 56
+    lines = [
+        f"Dear {sender},",
+        "",
+        f"The following batch of {len(extractions)} invoices has been extracted and validated.",
+        "Please review all details carefully.",
+        "",
+    ]
+
+    for i, ex in enumerate(extractions, 1):
+        s = ex.get("summary") or {}
+        sup = (ex.get("supplier") or {}).get("name", "—")
+        inv_num = ex.get("invoice_number", "—")
+        gross = _fmt(s.get("total_gross_worth"))
+        items = ex.get("line_items") or []
+
+        lines += [
+            f"  INVOICE {i} of {len(extractions)}",
+            f"    Invoice #  : {inv_num}",
+            f"    Supplier   : {sup}",
+            f"    Date       : {ex.get('date_of_issue', '—')}",
+            f"    Line items : {len(items)}",
+            f"    Gross Total: {gross}",
+            f"    Status     : ✓ All checks passed",
+            SEP,
+            "",
+        ]
+
+    lines += [
+        f"  All {len(extractions)} invoices passed validation.",
+        "",
+        "  ► To STORE ALL invoices to the payment queue, reply with ACCEPT.",
+        "  ► To DISCARD ALL and send to manual corrections, reply with DECLINE.",
+        "",
+        "Regards,",
+        "AIMailbox",
+    ]
+    return "\n".join(lines)
+
+
+def batch_rejected(sender: str, results: list[dict]) -> str:
+    """Rejection email showing per-invoice pass/fail status."""
+    passed = sum(1 for r in results if r["passed"])
+    failed = sum(1 for r in results if not r["passed"])
+
+    SEP = "  " + "─" * 56
+    lines = [
+        f"Dear {sender},",
+        "",
+        f"Your batch of {len(results)} invoices could not be processed.",
+        f"{failed} invoice(s) failed validation — the entire batch has been rejected.",
+        "",
+    ]
+
+    for r in results:
+        status = "✓ PASSED" if r["passed"] else "✗ FAILED"
+        inv_num = r.get("invoice_number", "—")
+        lines += [
+            f"  Invoice {r['index']}: {r['filename']}",
+            f"    Invoice #: {inv_num}",
+            f"    Status   : {status}",
+        ]
+        if not r["passed"]:
+            lines.append(f"    Reason   : {r['message']}")
+        lines.append("")
+
+    lines += [
+        SEP,
+        "",
+        "Since one or more invoices failed, none have been stored.",
+        "Please correct the failed invoices and resubmit only the valid ones",
+        "in a new batch.",
+        "",
+        "Regards,",
+        "AIMailbox",
+    ]
+    return "\n".join(lines)
+
+
+def batch_confirmed(sender: str, extractions: list[dict]) -> str:
+    """Confirmation email after batch accepted."""
+    inv_list = []
+    for ex in extractions:
+        inv_num = ex.get("invoice_number", "—")
+        sup = (ex.get("supplier") or {}).get("name", "—")
+        s = ex.get("summary") or {}
+        gross = _fmt(s.get("total_gross_worth"))
+        inv_list.append(f"  • {inv_num} from {sup} — {gross}")
+
+    return (
+        f"Dear {sender},\n\n"
+        f"All {len(extractions)} invoices have been accepted\n"
+        f"and stored to the payment queue.\n\n"
+        + "\n".join(inv_list) + "\n\n"
+        f"No further action required.\n\n"
+        f"Regards,\nAIMailbox"
+    )
+
+
+def batch_declined(sender: str, extractions: list[dict]) -> str:
+    """Decline email for entire batch."""
+    return (
+        f"Dear {sender},\n\n"
+        f"All {len(extractions)} invoices in the batch have been declined\n"
+        f"and will not be stored.\n\n"
+        f"They have been flagged for manual review.\n"
+        f"Please resubmit with any necessary corrections.\n\n"
+        f"Regards,\nAIMailbox"
+    )

@@ -24,7 +24,7 @@ const MAILBOX  = 'AIMailbox@gmail.com';
    STATE
 ═══════════════════════════ */
 const state = {
-  attachment: null,      // { name, size, type, base64 }
+  attachments: [],       // [{ name, size, type, base64 }, …]
   threads: [],           // array of thread objects
   activeThreadId: null,
   abortControllers: {},  // threadId → AbortController
@@ -49,9 +49,8 @@ const cBody         = $('cBody');
 
 const attachDrop    = $('attachDrop');
 const attachInput   = $('attachInput');
-const attachChip    = $('attachChip');
-const attachChipName= $('attachChipName');
-const attachRemove  = $('attachRemove');
+const attachDropText= $('attachDropText');
+const attachList    = $('attachList');
 
 const sendBtn       = $('sendBtn');
 const sendBtnLabel  = $('sendBtnLabel');
@@ -97,37 +96,85 @@ function closeCompose() {
 }
 
 /* ═══════════════════════════
-   ATTACHMENT
+   ATTACHMENT (multi-file)
 ═══════════════════════════ */
+const MAX_ATTACHMENTS = 10;
+
 attachDrop.addEventListener('click', () => attachInput.click());
 attachDrop.addEventListener('dragover', e => { e.preventDefault(); attachDrop.style.borderColor = 'var(--amber)'; });
 attachDrop.addEventListener('dragleave', () => { attachDrop.style.borderColor = ''; });
 attachDrop.addEventListener('drop', e => {
   e.preventDefault();
   attachDrop.style.borderColor = '';
-  if (e.dataTransfer.files[0]) loadAttachment(e.dataTransfer.files[0]);
+  if (e.dataTransfer.files.length) addAttachments(e.dataTransfer.files);
 });
-attachInput.addEventListener('change', () => { if (attachInput.files[0]) loadAttachment(attachInput.files[0]); });
-attachRemove.addEventListener('click', clearAttachment);
+attachInput.addEventListener('change', () => { if (attachInput.files.length) addAttachments(attachInput.files); });
 
-function loadAttachment(file) {
-  if (file.size > 25 * 1024 * 1024) { audit('File too large (max 25 MB).', 'warn'); return; }
-  const reader = new FileReader();
-  reader.onload = e => {
-    state.attachment = { name: file.name, size: file.size, type: file.type, base64: e.target.result.split(',')[1] };
-    attachChipName.textContent = `${file.name} (${fmtBytes(file.size)})`;
-    attachDrop.classList.add('hidden');
-    attachChip.classList.remove('hidden');
-    audit(`Attachment loaded: ${file.name}`, 'info');
-  };
-  reader.readAsDataURL(file);
+function addAttachments(files) {
+  const remaining = MAX_ATTACHMENTS - state.attachments.length;
+  if (remaining <= 0) { audit(`Maximum ${MAX_ATTACHMENTS} files reached.`, 'warn'); return; }
+
+  const toAdd = Array.from(files).slice(0, remaining);
+  if (toAdd.length < files.length) {
+    audit(`Only ${toAdd.length} of ${files.length} files added (limit ${MAX_ATTACHMENTS}).`, 'warn');
+  }
+
+  let pending = 0;
+  let loaded = 0;
+  for (const file of toAdd) {
+    if (file.size > 25 * 1024 * 1024) { audit(`${file.name}: too large (max 25 MB).`, 'warn'); continue; }
+    pending++;
+    const reader = new FileReader();
+    reader.onload = e => {
+      state.attachments.push({
+        name: file.name, size: file.size, type: file.type,
+        base64: e.target.result.split(',')[1],
+      });
+      loaded++;
+      if (loaded === pending) renderAttachList();
+      audit(`Attachment loaded: ${file.name}`, 'info');
+    };
+    reader.readAsDataURL(file);
+  }
+  if (pending === 0) renderAttachList();
 }
 
-function clearAttachment() {
-  state.attachment = null;
+function removeAttachment(index) {
+  state.attachments.splice(index, 1);
+  renderAttachList();
+}
+
+function clearAttachments() {
+  state.attachments = [];
   attachInput.value = '';
-  attachChip.classList.add('hidden');
-  attachDrop.classList.remove('hidden');
+  renderAttachList();
+}
+
+function renderAttachList() {
+  attachList.innerHTML = '';
+  state.attachments.forEach((a, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'attach-chip';
+    chip.innerHTML = `
+      <span class="attach-chip-icon">📎</span>
+      <span class="attach-chip-name">${esc(a.name)} (${fmtBytes(a.size)})</span>
+      <button class="attach-chip-remove">✕</button>
+    `;
+    chip.querySelector('.attach-chip-remove').addEventListener('click', e => {
+      e.stopPropagation();
+      removeAttachment(i);
+    });
+    attachList.appendChild(chip);
+  });
+
+  if (state.attachments.length >= MAX_ATTACHMENTS) {
+    attachDrop.classList.add('hidden');
+  } else {
+    attachDrop.classList.remove('hidden');
+    attachDropText.textContent = state.attachments.length > 0
+      ? `Add more invoices (${state.attachments.length}/${MAX_ATTACHMENTS})`
+      : `Attach invoices (max ${MAX_ATTACHMENTS})`;
+  }
 }
 
 /* ═══════════════════════════
@@ -139,7 +186,8 @@ async function handleSend() {
   const from    = cFrom.value.trim();
   const subject = cSubject.value.trim();
   const body    = cBody.value.trim();
-  const hasFile = !!state.attachment;
+  const hasFile = state.attachments.length > 0;
+  const hasMultipleFiles = state.attachments.length > 1;
   const hasText = !!body;
 
   if (!from)           { audit('Please enter a FROM address.', 'warn'); cFrom.focus(); return; }
@@ -147,23 +195,28 @@ async function handleSend() {
   if (!hasFile && !hasText) { audit('Please attach an invoice or write a message body.', 'warn'); return; }
 
   let pipeline, pipelineLabel;
-  if (hasFile && hasText)  { pipeline = 'combined_verification'; pipelineLabel = 'COMBINED'; }
-  else if (hasFile)        { pipeline = 'invoice_extraction';    pipelineLabel = 'INVOICE';  }
-  else                     { pipeline = 'supplier_query';        pipelineLabel = 'QUERY';    }
+  if (hasMultipleFiles)      { pipeline = 'invoice_batch';          pipelineLabel = 'BATCH';    }
+  else if (hasFile && hasText) { pipeline = 'combined_verification'; pipelineLabel = 'COMBINED'; }
+  else if (hasFile)          { pipeline = 'invoice_extraction';    pipelineLabel = 'INVOICE';  }
+  else                       { pipeline = 'supplier_query';        pipelineLabel = 'QUERY';    }
 
-  const finalSubject = subject || (hasFile ? `Invoice — ${state.attachment.name}` : 'Supplier Query');
+  const finalSubject = subject || (hasFile ? `Invoice — ${state.attachments[0].name}` : 'Supplier Query');
 
   const threadId = `thread_${Date.now()}`;
   const now = new Date();
 
+  const attachmentsList = hasFile
+    ? state.attachments.map(a => ({ name: a.name, size: a.size }))
+    : null;
+
   const outboundMsg = {
-    id:        `msg_${Date.now()}`,
-    direction: 'outbound',
+    id:          `msg_${Date.now()}`,
+    direction:   'outbound',
     from,
-    to:        MAILBOX,
-    time:      now,
-    body:      body || null,
-    attachment: hasFile ? { name: state.attachment.name, size: state.attachment.size } : null,
+    to:          MAILBOX,
+    time:        now,
+    body:        body || null,
+    attachments: attachmentsList,
     pipeline,
     pipelineLabel,
   };
@@ -178,6 +231,7 @@ async function handleSend() {
     status:   'pending',
     time:     now,
     pendingInvoiceNumber: null,
+    pendingBatchKey:      null,
   };
 
   state.threads.unshift(thread);
@@ -192,25 +246,55 @@ async function handleSend() {
 
   cFrom.value = ''; cSubject.value = ''; cBody.value = '';
 
-  // Combined: fire invoice extraction first, then query independently
-  if (hasFile && hasText) {
+  if (hasMultipleFiles) {
+    // ── Batch: send all invoices in one request ──
+    const batchPayload = {
+      pipeline:  'invoice_batch',
+      timestamp: now.toISOString(),
+      email:     { from, subject: finalSubject, body: null },
+      invoices:  state.attachments.map(a => ({
+        filename:          a.name,
+        mime_type:         a.type,
+        size_bytes:        a.size,
+        base64_data:       a.base64,
+        extraction_engine: 'docling',
+      })),
+    };
+    clearAttachments();
+
+    await callBackend(threadId, batchPayload);
+
+    // If there was also body text, fire a query after the batch resolves
+    if (hasText) {
+      const stillExists = state.threads.find(t => t.id === threadId);
+      if (stillExists) {
+        showProcessing(threadId, false);
+        const queryPayload = {
+          pipeline:  'supplier_query',
+          timestamp: new Date().toISOString(),
+          email:     { from, subject: finalSubject, body },
+        };
+        await callBackend(threadId, queryPayload);
+      }
+    }
+  } else if (hasFile && hasText) {
+    // ── Single file + text: combined flow (invoice first, then query) ──
     const invPayload = {
       pipeline:  'invoice_extraction',
       timestamp: now.toISOString(),
       email:     { from, subject: finalSubject, body: null },
       invoice:   {
-        filename:          state.attachment.name,
-        mime_type:         state.attachment.type,
-        size_bytes:        state.attachment.size,
-        base64_data:       state.attachment.base64,
+        filename:          state.attachments[0].name,
+        mime_type:         state.attachments[0].type,
+        size_bytes:        state.attachments[0].size,
+        base64_data:       state.attachments[0].base64,
         extraction_engine: 'docling',
       },
     };
-    clearAttachment();
+    clearAttachments();
 
     await callBackend(threadId, invPayload);
 
-    // Thread may have been deleted while invoice was processing
     const stillExists = state.threads.find(t => t.id === threadId);
     if (stillExists) {
       showProcessing(threadId, false);
@@ -222,19 +306,20 @@ async function handleSend() {
       await callBackend(threadId, queryPayload);
     }
   } else {
+    // ── Single file or query only ──
     const payload = {
       pipeline,
       timestamp: now.toISOString(),
       email:     { from, subject: finalSubject, body: body || null },
       invoice: hasFile ? {
-        filename:          state.attachment.name,
-        mime_type:         state.attachment.type,
-        size_bytes:        state.attachment.size,
-        base64_data:       state.attachment.base64,
+        filename:          state.attachments[0].name,
+        mime_type:         state.attachments[0].type,
+        size_bytes:        state.attachments[0].size,
+        base64_data:       state.attachments[0].base64,
         extraction_engine: 'docling',
       } : null,
     };
-    clearAttachment();
+    clearAttachments();
     await callBackend(threadId, payload);
   }
 }
@@ -274,6 +359,16 @@ async function callBackend(threadId, payload, attempt = 1, _controller = null) {
       const retryAfter = parseInt(res.headers.get('Retry-After') || '5', 10) * 1000;
       audit(`Server still loading… retrying in ${retryAfter / 1000} s (attempt ${attempt}/${MAX_ATTEMPTS})`, 'warn');
       setTimeout(() => callBackend(threadId, payload, attempt + 1, controller), retryAfter);
+      return;
+    }
+
+    if (res.status === 429) {
+      removeProcessing(threadId);
+      addReplyMessage(threadId, {
+        status: 'error',
+        body:   'Rate limit reached. Please wait a moment before sending another request.',
+      });
+      audit('Rate limited by server (429).', 'warn');
       return;
     }
 
@@ -363,14 +458,17 @@ function renderMessage(msg, thread) {
           <span class="message-time">${fmtTime(msg.time)}</span>
           <span class="message-type-badge ${
             msg.pipeline === 'invoice_extraction' ? 'invoice'
+          : msg.pipeline === 'invoice_batch'      ? 'combined'
           : msg.pipeline === 'supplier_query'     ? 'query'
           : msg.pipeline === 'invoice_approval' && msg.pipelineLabel === 'ACCEPT'  ? 'combined'
           : msg.pipeline === 'invoice_approval' && msg.pipelineLabel === 'DECLINE' ? 'decline'
+          : msg.pipeline === 'batch_approval'   && msg.pipelineLabel === 'ACCEPT'  ? 'combined'
+          : msg.pipeline === 'batch_approval'   && msg.pipelineLabel === 'DECLINE' ? 'decline'
           : 'combined'}">${msg.pipelineLabel}</span>
         </div>
       </div>
       ${msg.body ? `<div class="message-body">${esc(msg.body)}</div>` : ''}
-      ${msg.attachment ? `<div class="message-attachment">📎 ${esc(msg.attachment.name)} <span style="color:var(--text-muted)">(${fmtBytes(msg.attachment.size)})</span></div>` : ''}
+      ${msg.attachments ? msg.attachments.map(a => `<div class="message-attachment">📎 ${esc(a.name)} <span style="color:var(--text-muted)">(${fmtBytes(a.size)})</span></div>`).join('') : msg.attachment ? `<div class="message-attachment">📎 ${esc(msg.attachment.name)} <span style="color:var(--text-muted)">(${fmtBytes(msg.attachment.size)})</span></div>` : ''}
       <div class="message-actions">
         <button class="msg-action-btn reply-action" data-action="reply">↩ Reply</button>
         <button class="msg-action-btn forward-action" data-action="forward">↗ Forward</button>
@@ -435,6 +533,9 @@ function openReplyComposer(thread) {
   if (thread.pendingInvoiceNumber) {
     replyComposerHint.textContent = `Invoice ${thread.pendingInvoiceNumber} awaiting review — reply "accept" or "decline"`;
     replyComposerHint.classList.add('visible');
+  } else if (thread.pendingBatchKey) {
+    replyComposerHint.textContent = `Batch of invoices awaiting review — reply "accept" or "decline"`;
+    replyComposerHint.classList.add('visible');
   } else {
     replyComposerHint.textContent = '';
     replyComposerHint.classList.remove('visible');
@@ -469,39 +570,73 @@ function handleReplySend() {
   closeReplyComposer();
 
   const normalised = body.toLowerCase().replace(/[^a-z]/g, '');
-  const isAccept  = thread.pendingInvoiceNumber && normalised === 'accept';
-  const isDecline = thread.pendingInvoiceNumber && normalised === 'decline';
+  const isAccept  = (thread.pendingInvoiceNumber || thread.pendingBatchKey) && normalised === 'accept';
+  const isDecline = (thread.pendingInvoiceNumber || thread.pendingBatchKey) && normalised === 'decline';
 
   if (isAccept || isDecline) {
     const decision = isAccept ? 'accept' : 'decline';
-    const invoiceNumber = thread.pendingInvoiceNumber;
-    thread.pendingInvoiceNumber = null;
 
-    const outMsg = {
-      id:            `msg_${Date.now()}`,
-      direction:     'outbound',
-      from:          thread.from,
-      to:            MAILBOX,
-      time:          new Date(),
-      body,
-      attachment:    null,
-      pipeline:      'invoice_approval',
-      pipelineLabel: decision.toUpperCase(),
-    };
-    thread.messages.push(outMsg);
-    renderMessage(outMsg, thread);
-    showProcessing(thread.id);
+    if (thread.pendingInvoiceNumber) {
+      // ── Single invoice approval ──
+      const invoiceNumber = thread.pendingInvoiceNumber;
+      thread.pendingInvoiceNumber = null;
 
-    audit(`Reply: ${decision.toUpperCase()} for invoice ${invoiceNumber}`,
-          decision === 'accept' ? 'ok' : 'warn');
+      const outMsg = {
+        id:            `msg_${Date.now()}`,
+        direction:     'outbound',
+        from:          thread.from,
+        to:            MAILBOX,
+        time:          new Date(),
+        body,
+        attachments:   null,
+        pipeline:      'invoice_approval',
+        pipelineLabel: decision.toUpperCase(),
+      };
+      thread.messages.push(outMsg);
+      renderMessage(outMsg, thread);
+      showProcessing(thread.id);
 
-    callBackend(thread.id, {
-      pipeline:       'invoice_approval',
-      timestamp:      new Date().toISOString(),
-      invoice_number: invoiceNumber,
-      decision,
-      email: { from: thread.from, subject: `Re: ${thread.subject}`, body },
-    });
+      audit(`Reply: ${decision.toUpperCase()} for invoice ${invoiceNumber}`,
+            decision === 'accept' ? 'ok' : 'warn');
+
+      callBackend(thread.id, {
+        pipeline:       'invoice_approval',
+        timestamp:      new Date().toISOString(),
+        invoice_number: invoiceNumber,
+        decision,
+        email: { from: thread.from, subject: `Re: ${thread.subject}`, body },
+      });
+    } else {
+      // ── Batch approval ──
+      const batchKey = thread.pendingBatchKey;
+      thread.pendingBatchKey = null;
+
+      const outMsg = {
+        id:            `msg_${Date.now()}`,
+        direction:     'outbound',
+        from:          thread.from,
+        to:            MAILBOX,
+        time:          new Date(),
+        body,
+        attachments:   null,
+        pipeline:      'batch_approval',
+        pipelineLabel: decision.toUpperCase(),
+      };
+      thread.messages.push(outMsg);
+      renderMessage(outMsg, thread);
+      showProcessing(thread.id);
+
+      audit(`Reply: ${decision.toUpperCase()} for invoice batch`,
+            decision === 'accept' ? 'ok' : 'warn');
+
+      callBackend(thread.id, {
+        pipeline:  'batch_approval',
+        timestamp: new Date().toISOString(),
+        batch_key: batchKey,
+        decision,
+        email: { from: thread.from, subject: `Re: ${thread.subject}`, body },
+      });
+    }
   } else {
     // Generic reply — route as a new query to backend
     const outMsg = {
@@ -518,8 +653,11 @@ function handleReplySend() {
     thread.messages.push(outMsg);
     renderMessage(outMsg, thread);
 
-    if (thread.pendingInvoiceNumber) {
+    if (thread.pendingInvoiceNumber || thread.pendingBatchKey) {
       // Still pending approval — remind, don't route to backend
+      const ref = thread.pendingInvoiceNumber
+        ? `invoice ${thread.pendingInvoiceNumber}`
+        : 'the invoice batch';
       const hintMsg = {
         id:        `msg_${Date.now() + 1}`,
         direction: 'inbound',
@@ -527,7 +665,7 @@ function handleReplySend() {
         to:        thread.from,
         time:      new Date(),
         status:    'pending_approval',
-        body:      `Your reply was noted, but invoice ${thread.pendingInvoiceNumber} is still awaiting your decision.\n\nPlease reply with "accept" or "decline" to proceed.`,
+        body:      `Your reply was noted, but ${ref} is still awaiting your decision.\n\nPlease reply with "accept" or "decline" to proceed.`,
       };
       thread.messages.push(hintMsg);
       renderMessage(hintMsg, thread);
@@ -614,6 +752,7 @@ function addReplyMessage(threadId, data) {
   } else if (isPendingApproval) {
     thread.status = 'pending_approval';
     thread.pendingInvoiceNumber = data.invoice_number || null;
+    thread.pendingBatchKey      = data.batch_key      || null;
   } else if (thread.status !== 'pending_approval') {
     thread.status = 'replied';
   }
@@ -682,7 +821,8 @@ function addInboxRow(thread) {
   row.dataset.id = thread.id;
 
   const badgeClass = thread.pipeline === 'invoice_extraction' ? 'invoice'
-                   : thread.pipeline === 'supplier_query'     ? 'query' : 'combined';
+                   : thread.pipeline === 'supplier_query'     ? 'query'
+                   : thread.pipeline === 'invoice_batch'      ? 'combined' : 'combined';
   const badgeLabel = thread.pipelineLabel;
 
   const snippet = (thread.messages[0] && thread.messages[0].body)

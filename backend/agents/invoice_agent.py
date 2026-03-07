@@ -3,7 +3,7 @@ invoice_agent.py — DocLing extraction + validation coordinator
 """
 
 from __future__ import annotations
-import base64, os, sys, tempfile
+import base64, os, sys, tempfile, uuid
 
 # Ensure backend/ is on sys.path regardless of how this module is imported
 _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -16,6 +16,10 @@ from agents.db import execute, query as db_query
 # In-memory store for invoices awaiting user accept/decline.
 # Keyed by invoice_number. Entry removed once approved or declined.
 _pending: dict[str, dict] = {}
+
+# In-memory store for batch approvals.
+# Keyed by batch UUID. Entry removed once approved or declined.
+_pending_batches: dict[str, list[dict]] = {}
 
 
 def run(invoice: dict | None, email: dict, route: str, llm) -> dict:
@@ -45,6 +49,97 @@ def run(invoice: dict | None, email: dict, route: str, llm) -> dict:
             "status":        "rejected",
             "failed_checks": [c["message"] for c in failed],
             "email_body":    email_draft.rejected(sender, extracted, failed),
+        }
+
+
+def run_batch(invoices: list[dict], email: dict, route: str, llm) -> dict:
+    """Process a batch of invoices — extract and validate each individually."""
+    sender = email.get("from", "unknown")
+
+    if not invoices:
+        return _err(sender, "No invoices attached. Please resubmit with your invoices.")
+
+    results = []
+    extractions = []
+
+    for i, invoice in enumerate(invoices, 1):
+        filename = invoice.get("filename", f"invoice_{i}")
+        print(f"[invoice_agent] Batch: processing {i}/{len(invoices)} — {filename}")
+
+        extracted = _extract(invoice, llm)
+        if extracted.get("error"):
+            results.append({
+                "index": i, "filename": filename, "passed": False,
+                "message": f"Could not read invoice: {extracted['error']}",
+            })
+            continue
+
+        checks = validation.run_all(extracted)
+        failed = [c for c in checks if not c["passed"]]
+        inv_num = extracted.get("invoice_number") or f"unknown_{i}"
+
+        if failed:
+            results.append({
+                "index": i, "filename": filename, "invoice_number": inv_num,
+                "passed": False,
+                "message": "; ".join(c["message"] for c in failed),
+            })
+        else:
+            results.append({
+                "index": i, "filename": filename, "invoice_number": inv_num,
+                "passed": True, "message": "All checks passed.",
+            })
+            extractions.append(extracted)
+
+    all_passed = all(r["passed"] for r in results)
+
+    if all_passed:
+        batch_key = str(uuid.uuid4())
+        _pending_batches[batch_key] = extractions
+        print(f"[invoice_agent] Batch {batch_key}: all {len(extractions)} invoices passed, awaiting approval")
+        return {
+            "status":    "pending_approval",
+            "batch_key": batch_key,
+            "email_body": email_draft.batch_approval_request(sender, extractions, results),
+        }
+    else:
+        failed_count = sum(1 for r in results if not r["passed"])
+        print(f"[invoice_agent] Batch rejected: {failed_count} of {len(results)} failed")
+        return {
+            "status":     "rejected",
+            "email_body": email_draft.batch_rejected(sender, results),
+        }
+
+
+def run_batch_approval(batch_key: str, decision: str, sender: str) -> dict:
+    """Process accept/decline for an entire pending batch."""
+    batch = _pending_batches.pop(batch_key, None)
+    if batch is None:
+        return {
+            "status":     "error",
+            "email_body": (
+                f"Dear {sender},\n\n"
+                f"Could not find a pending batch.\n"
+                f"It may have already been processed, or the server may have restarted.\n"
+                f"Please resubmit the invoices if needed.\n\n"
+                f"Regards,\nAIMailbox"
+            ),
+        }
+    if decision == "accept":
+        for ex in batch:
+            _store(ex)
+        print(f"[invoice_agent] Batch ACCEPTED — {len(batch)} invoices stored.")
+        return {
+            "status":    "approved",
+            "batch_key": batch_key,
+            "email_body": email_draft.batch_confirmed(sender, batch),
+        }
+    else:
+        print(f"[invoice_agent] Batch DECLINED — {len(batch)} invoices discarded.")
+        return {
+            "status":    "declined",
+            "batch_key": batch_key,
+            "email_body": email_draft.batch_declined(sender, batch),
         }
 
 
@@ -266,6 +361,7 @@ def _parse_date(raw: str | None) -> str | None:
     from datetime import datetime
     for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y",
                 "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y",
+                "%b %d,%Y", "%B %d,%Y",
                 "%m/%d/%y", "%d/%m/%y"):
         try:
             return datetime.strptime(raw.strip(), fmt).strftime("%Y-%m-%d")
@@ -285,26 +381,30 @@ def _store(ex: dict):
     import json as _json
 
     sup = ex.get("supplier") or {}
-    execute(
-        """INSERT INTO suppliers (name, address, tax_id, iban)
-           VALUES (:name, :address, :tax_id, :iban)
-           ON DUPLICATE KEY UPDATE address=VALUES(address), iban=VALUES(iban)""",
-        sup,
-    )
-    sup_id = (db_query(
-        "SELECT id FROM suppliers WHERE name=:name", {"name": sup.get("name")}
-    ) or [{}])[0].get("id")
+    sup_id = None
+    if sup.get("name"):
+        execute(
+            """INSERT INTO suppliers (name, address, tax_id, iban)
+               VALUES (:name, :address, :tax_id, :iban)
+               ON DUPLICATE KEY UPDATE address=VALUES(address), iban=VALUES(iban)""",
+            sup,
+        )
+        sup_id = (db_query(
+            "SELECT id FROM suppliers WHERE name=:name", {"name": sup["name"]}
+        ) or [{}])[0].get("id")
 
     cli = ex.get("client") or {}
-    execute(
-        """INSERT INTO clients (name, address, tax_id)
-           VALUES (:name, :address, :tax_id)
-           ON DUPLICATE KEY UPDATE address=VALUES(address)""",
-        cli,
-    )
-    cli_id = (db_query(
-        "SELECT id FROM clients WHERE name=:name", {"name": cli.get("name")}
-    ) or [{}])[0].get("id")
+    cli_id = None
+    if cli.get("name"):
+        execute(
+            """INSERT INTO clients (name, address, tax_id)
+               VALUES (:name, :address, :tax_id)
+               ON DUPLICATE KEY UPDATE address=VALUES(address)""",
+            cli,
+        )
+        cli_id = (db_query(
+            "SELECT id FROM clients WHERE name=:name", {"name": cli["name"]}
+        ) or [{}])[0].get("id")
 
     s = ex.get("summary") or {}
     execute(

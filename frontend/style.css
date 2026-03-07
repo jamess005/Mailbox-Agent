@@ -46,8 +46,6 @@ html, body {
   font-size: 13px;
   line-height: 1.6;
   overflow: hidden;
-  display: flex;
-  flex-direction: column;
 }
 
 ::-webkit-scrollbar { width: 4px; height: 4px; }
@@ -558,6 +556,14 @@ body {
 }
 
 /* Attachment */
+.attachment-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
 .attach-drop {
   display: flex;
   align-items: center;
@@ -609,6 +615,12 @@ body {
   transition: color var(--ease);
 }
 .attach-chip-remove:hover { color: var(--red); }
+
+.attach-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
 
 /* Send button */
 .send-btn {

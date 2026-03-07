@@ -21,7 +21,13 @@ def get_engine() -> Engine:
             f"{os.environ['MYSQL_USER']}:{os.environ['MYSQL_PASSWORD']}"
             f"@{os.environ['MYSQL_HOST']}/{os.environ['MYSQL_DB']}"
         )
-        _engine = create_engine(url, pool_pre_ping=True, pool_recycle=3600)
+        _engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            pool_size=5,
+            max_overflow=10,
+        )
     return _engine
 
 

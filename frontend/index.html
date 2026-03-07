@@ -6,7 +6,7 @@
   <title>AIMailbox — Invoice & Query Processing</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20260306g" />
+  <link rel="stylesheet" href="style.css?v=20260306m" />
 </head>
 <body>
 
@@ -69,15 +69,11 @@
       <div class="compose-footer">
         <div class="attachment-area" id="attachArea">
           <div class="attach-drop" id="attachDrop">
-            <input type="file" id="attachInput" accept=".png,.jpg,.jpeg,.pdf,.tiff,.tif" hidden />
+            <input type="file" id="attachInput" accept=".png,.jpg,.jpeg,.pdf,.tiff,.tif" multiple hidden />
             <span class="attach-drop-icon">📎</span>
-            <span class="attach-drop-text">Attach invoice</span>
+            <span class="attach-drop-text" id="attachDropText">Attach invoices (max 10)</span>
           </div>
-          <div class="attach-chip hidden" id="attachChip">
-            <span class="attach-chip-icon">📎</span>
-            <span class="attach-chip-name" id="attachChipName"></span>
-            <button class="attach-chip-remove" id="attachRemove">✕</button>
-          </div>
+          <div class="attach-list" id="attachList"></div>
         </div>
         <button class="send-btn" id="sendBtn">
           <span id="sendBtnLabel">SEND</span>
@@ -126,6 +122,6 @@
     </div>
   </footer>
 
-  <script src="script.js?v=20260306k"></script>
+  <script src="script.js?v=20260306m"></script>
 </body>
 </html>

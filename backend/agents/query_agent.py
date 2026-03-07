@@ -112,8 +112,9 @@ def run(email: dict, llm) -> dict:
     _set_max_tokens(llm, 32)   # restore
 
     # Build a professional email body with an intro line
-    intro = _build_intro(question, rows)
-    body  = f"Dear {sender},\n\n{intro}\n\n{answer}\n\nRegards,\nAIMailbox"
+    intro = _build_intro(question, rows) if rows else ""
+    body  = f"Dear {sender},\n\n{intro}\n\n{answer}\n\nRegards,\nAIMailbox" if intro else \
+            f"Dear {sender},\n\n{answer}\n\nRegards,\nAIMailbox"
 
     return {
         "status":     "ok",
@@ -230,14 +231,43 @@ def _sanitize_sql(sql: str) -> str:
     return result
 
 
+# Keywords that must never appear in LLM-generated queries
+_BLOCKED_SQL_KW = (
+    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE",
+    "GRANT", "REVOKE", "EXECUTE", "RENAME", "REPLACE", "CALL",
+)
+
+# Patterns that must not appear (covers function-style and multi-word keywords)
+_BLOCKED_SQL_PATTERNS = (
+    r'\bLOAD\b', r'\bLOAD_FILE\b', r'\bOUTFILE\b', r'\bDUMPFILE\b',
+    r'\bINTO\s+OUTFILE\b', r'\bINTO\s+DUMPFILE\b',
+    r'\bSET\s+@', r'\bSET\s+GLOBAL\b', r'\bSET\s+SESSION\b',
+)
+
+# Maximum rows the query agent will return (defence against SELECT * on huge tables)
+_MAX_ROWS = 50
+
+
 def _safe_query(sql: str) -> tuple[list[dict], str | None]:
     if not sql.strip().upper().startswith("SELECT"):
         return [], "Only SELECT queries permitted."
-    # Defence: reject dangerous keywords
+    # Reject stacked queries (semicolons)
+    if ";" in sql:
+        return [], "Blocked: multiple statements not permitted."
     upper = sql.upper()
-    for kw in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE"):
+    for kw in _BLOCKED_SQL_KW:
         if re.search(rf'\b{kw}\b', upper):
             return [], f"Blocked: {kw} not permitted."
+    # Reject blocked patterns (functions, multi-word keywords)
+    for pat in _BLOCKED_SQL_PATTERNS:
+        if re.search(pat, upper):
+            return [], f"Blocked: disallowed SQL pattern."
+    # Reject UNION-based injection attempts
+    if re.search(r'\bUNION\b', upper):
+        return [], "Blocked: UNION not permitted."
+    # Enforce a row limit
+    if not re.search(r'\bLIMIT\b', upper):
+        sql = sql.rstrip().rstrip(';') + f' LIMIT {_MAX_ROWS}'
     try:
         return db_query(sql), None
     except Exception as e:
@@ -257,7 +287,9 @@ def _format_answer(question: str, rows: list[dict], llm) -> str:
     _set_max_tokens(llm, 150)
     chain  = ANSWER_PROMPT | llm | StrOutputParser()
     raw = (chain.invoke({"question": question, "results": results_str})).strip()
-    for marker in ("```", "## Step", "Note:", "Disclaimer", "---"):
+    for marker in ("```", "## Step", "Note:", "Disclaimer", "---",
+                    "\nThe user asked:", "\nDatabase results:", "\nWrite a concise",
+                    "\nFormat each datum", "\nDo not write"):
         if marker in raw:
             raw = raw[:raw.index(marker)].strip()
     paragraphs = [p.strip() for p in raw.split("\n\n") if p.strip()]
