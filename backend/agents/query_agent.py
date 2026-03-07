@@ -11,7 +11,7 @@ if _backend not in sys.path:
 
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from agents.db import query as db_query
+from agents.db import query_readonly as db_query
 
 # ── Exact schema matching the real MySQL tables ──
 DB_SCHEMA = """\
